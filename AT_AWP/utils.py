@@ -2,6 +2,7 @@ import numpy as np
 from collections import namedtuple
 import torch
 from torch import nn
+from torch.utils.data import random_split
 import torchvision
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -91,12 +92,20 @@ class Transform():
 ## dataset
 #####################
 
-def cifar10(root):
+def cifar10(root, if_val = True, val_ratio = 0.2):
     train_set = torchvision.datasets.CIFAR10(root=root, train=True, download=True)
     test_set = torchvision.datasets.CIFAR10(root=root, train=False, download=True)
+    dummy_val_part = {}
+    if if_val:
+        length = len(train_set)
+        train_length = int((1 - val_ratio) * length)
+        train_subset, val_subset = random_split(train_set, [train_length, length - train_length])
+        train_set = train_subset.dataset
+        dummy_val_part = {'val': {'data': val_subset.dataset.data, 'labels': val_subset.dataset.targets}}
     return {
         'train': {'data': train_set.data, 'labels': train_set.targets},
-        'test': {'data': test_set.data, 'labels': test_set.targets}
+        'test': {'data': test_set.data, 'labels': test_set.targets},
+        **dummy_val_part
     }
 
 #####################

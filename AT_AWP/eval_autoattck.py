@@ -10,16 +10,16 @@ import torchvision.transforms as transforms
 import sys
 sys.path.insert(0, '..')
 
-from AT_AWP.preactresnet import *
-from AT_AWP.wideresnet import *
+from preactresnet import *
+from wideresnet import *
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
 def filter_state_dict(state_dict):
     from collections import OrderedDict
 
-    if 'state_dict' in state_dict.keys():
-        state_dict = state_dict['state_dict']
+    if 'model_state' in state_dict.keys():
+        state_dict = state_dict['model_state']
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
         if 'sub_block' in k:
@@ -44,22 +44,22 @@ class Normalize(nn.Module):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--arch', type=str, default='WideResNet34',
+    parser.add_argument('--arch', type=str, default='PreActResNet18',
                         choices=['WideResNet28', 'WideResNet34', 'PreActResNet18'])
     parser.add_argument('--checkpoint', type=str, default='./model_test.pt')
     parser.add_argument('--data', type=str, default='CIFAR10', choices=['CIFAR10', 'CIFAR100'],
                         help='Which dataset the eval is on')
-    parser.add_argument('--data_dir', type=str, default='./data')
-    parser.add_argument('--preprocess', type=str, default='01',
+    parser.add_argument('--data_dir', type=str, default='./cifar-data')
+    parser.add_argument('--preprocess', type=str, default='meanstd',
                         choices=['meanstd', '01', '+-1'], help='The preprocess for data')
-    parser.add_argument('--norm', type=str, default='Linf', choices=['L2', 'Linf'])
+    parser.add_argument('--norm', type=str, default='L2', choices=['L2', 'Linf'])
     parser.add_argument('--epsilon', type=float, default=8./255.)
 
     parser.add_argument('--n_ex', type=int, default=10000)
     parser.add_argument('--individual', default=False, action='store_true')
     parser.add_argument('--save_dir', type=str, default='./adv_inputs')
     parser.add_argument('--batch_size', type=int, default=200)
-    parser.add_argument('--log_path', type=str, default='./log.txt')
+    parser.add_argument('--log_name', type=str, default='autoattack.txt')
     parser.add_argument('--version', type=str, default='standard')
 
     args = parser.parse_args()
@@ -94,6 +94,8 @@ if __name__ == '__main__':
     ckpt = filter_state_dict(torch.load(args.checkpoint, map_location=device))
     net.load_state_dict(ckpt)
 
+    log_path =os.path.join(os.path.dirname(args.checkpoint), args.log_name)
+
     model = nn.Sequential(Normalize(mean=mean, std=std), net)
 
     model.to(device)
@@ -111,7 +113,7 @@ if __name__ == '__main__':
     
     # load attack    
     from autoattack import AutoAttack
-    adversary = AutoAttack(model, norm=args.norm, eps=args.epsilon, log_path=args.log_path)
+    adversary = AutoAttack(model, norm=args.norm, eps=args.epsilon, log_path=log_path)
     
     l = [x for (x, y) in test_loader]
     x_test = torch.cat(l, 0)

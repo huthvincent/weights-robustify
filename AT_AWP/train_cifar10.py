@@ -3,14 +3,14 @@ import logging
 import sys
 import time
 import math
+from tqdm import tqdm
+import os
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
-
-import os
 
 from wideresnet import WideResNet
 from preactresnet import PreActResNet18
@@ -91,6 +91,7 @@ def attack_pgd(model, X, y, epsilon, alpha, attack_iters, restarts,
         for _ in range(attack_iters):
             output = model(normalize(X + delta))
             if early_stop:
+                # 只对 正确分类的 构造 对抗样本
                 index = torch.where(output.max(1)[1] == y)[0]
             else:
                 index = slice(None,None,None)
@@ -132,20 +133,20 @@ def get_args():
     parser.add_argument('--l1', default=0, type=float)
     parser.add_argument('--batch-size', default=128, type=int)
     parser.add_argument('--batch-size-test', default=128, type=int)
-    parser.add_argument('--data-dir', default='../cifar-data', type=str)
+    parser.add_argument('--data-dir', default='./cifar-data', type=str)
     parser.add_argument('--epochs', default=200, type=int)
     parser.add_argument('--lr-schedule', default='piecewise', choices=['superconverge', 'piecewise', 'linear', 'piecewisesmoothed', 'piecewisezoom', 'onedrop', 'multipledecay', 'cosine', 'cyclic'])
     parser.add_argument('--lr-max', default=0.1, type=float)
     parser.add_argument('--lr-one-drop', default=0.01, type=float)
     parser.add_argument('--lr-drop-epoch', default=100, type=int)
     parser.add_argument('--attack', default='pgd', type=str, choices=['pgd', 'fgsm', 'free', 'none'])
-    parser.add_argument('--epsilon', default=8, type=int)
+    parser.add_argument('--epsilon', default=128, type=int)
     parser.add_argument('--attack-iters', default=10, type=int)
     parser.add_argument('--attack-iters-test', default=20, type=int)
     parser.add_argument('--restarts', default=1, type=int)
     parser.add_argument('--pgd-alpha', default=2, type=float)
-    parser.add_argument('--fgsm-alpha', default=1.25, type=float)
-    parser.add_argument('--norm', default='l_inf', type=str, choices=['l_inf', 'l_2'])
+    parser.add_argument('--fgsm-alpha', default=12, type=float)
+    parser.add_argument('--norm', default='l_2', type=str, choices=['l_inf', 'l_2'])
     parser.add_argument('--fgsm-init', default='random', choices=['zero', 'random', 'previous'])
     parser.add_argument('--fname', default='cifar_model', type=str)
     parser.add_argument('--seed', default=0, type=int)
@@ -163,98 +164,7 @@ def get_args():
     parser.add_argument('--awp-warmup', default=0, type=int)
     return parser.parse_args()
 
-
-def main():
-    args = get_args()
-    if args.awp_gamma <= 0.0:
-        args.awp_warmup = np.infty
-
-    if not os.path.exists(args.fname):
-        os.makedirs(args.fname)
-
-    logger = logging.getLogger(__name__)
-    logging.basicConfig(
-        format='[%(asctime)s] - %(message)s',
-        datefmt='%Y/%m/%d %H:%M:%S',
-        level=logging.DEBUG,
-        handlers=[
-            logging.FileHandler(os.path.join(args.fname, 'eval.log' if args.eval else 'output.log')),
-            logging.StreamHandler()
-        ])
-
-    logger.info(args)
-
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
-
-    transforms = [Crop(32, 32), FlipLR()]
-    if args.cutout:
-        transforms.append(Cutout(args.cutout_len, args.cutout_len))
-    if args.val:
-        try:
-            dataset = torch.load("cifar10_validation_split.pth")
-        except:
-            print("Couldn't find a dataset with a validation split, did you run "
-                  "generate_validation.py?")
-            return
-        val_set = list(zip(transpose(dataset['val']['data']/255.), dataset['val']['labels']))
-        val_batches = Batches(val_set, args.batch_size, shuffle=False, num_workers=2)
-    else:
-        dataset = cifar10(args.data_dir)
-    train_set = list(zip(transpose(pad(dataset['train']['data'], 4)/255.),
-        dataset['train']['labels']))
-    train_set_x = Transform(train_set, transforms)
-    train_batches = Batches(train_set_x, args.batch_size, shuffle=True, set_random_choices=True, num_workers=2)
-
-    test_set = list(zip(transpose(dataset['test']['data']/255.), dataset['test']['labels']))
-    test_batches = Batches(test_set, args.batch_size_test, shuffle=False, num_workers=2)
-
-    epsilon = (args.epsilon / 255.)
-    pgd_alpha = (args.pgd_alpha / 255.)
-
-    if args.model == 'PreActResNet18':
-        model = PreActResNet18()
-        proxy = PreActResNet18()
-    elif args.model == 'WideResNet':
-        model = WideResNet(34, 10, widen_factor=args.width_factor, dropRate=0.0)
-        proxy = WideResNet(34, 10, widen_factor=args.width_factor, dropRate=0.0)
-    else:
-        raise ValueError("Unknown model")
-
-    model = nn.DataParallel(model).cuda()
-    proxy = nn.DataParallel(proxy).cuda()
-
-    if args.l2:
-        decay, no_decay = [], []
-        for name,param in model.named_parameters():
-            if 'bn' not in name and 'bias' not in name:
-                decay.append(param)
-            else:
-                no_decay.append(param)
-        params = [{'params':decay, 'weight_decay':args.l2},
-                  {'params':no_decay, 'weight_decay': 0 }]
-    else:
-        params = model.parameters()
-
-    opt = torch.optim.SGD(params, lr=args.lr_max, momentum=0.9, weight_decay=5e-4)
-    proxy_opt = torch.optim.SGD(proxy.parameters(), lr=0.01)
-    awp_adversary = AdvWeightPerturb(model=model, proxy=proxy, proxy_optim=proxy_opt, gamma=args.awp_gamma)
-
-    criterion = nn.CrossEntropyLoss()
-
-    if args.attack == 'free':
-        delta = torch.zeros(args.batch_size, 3, 32, 32).cuda()
-        delta.requires_grad = True
-    elif args.attack == 'fgsm' and args.fgsm_init == 'previous':
-        delta = torch.zeros(args.batch_size, 3, 32, 32).cuda()
-        delta.requires_grad = True
-
-    if args.attack == 'free':
-        epochs = int(math.ceil(args.epochs / args.attack_iters))
-    else:
-        epochs = args.epochs
-
+def config_lr_scheduler(args):
     if args.lr_schedule == 'superconverge':
         lr_schedule = lambda t: np.interp([t], [0, args.epochs * 2 // 5, args.epochs], [0, args.lr_max, 0])[0]
     elif args.lr_schedule == 'piecewise':
@@ -281,19 +191,105 @@ def main():
             return args.lr_max * 0.5 * (1 + np.cos(t / args.epochs * np.pi))
     elif args.lr_schedule == 'cyclic':
         lr_schedule = lambda t: np.interp([t], [0, 0.4 * args.epochs, args.epochs], [0, args.lr_max, 0])[0]
+    return lr_schedule
 
-    best_test_robust_acc = 0
-    best_val_robust_acc = 0
+def main():
+    args = get_args()
+    if args.awp_gamma <= 0.0:
+        args.awp_warmup = np.infty
+
+    if not os.path.exists(args.fname):
+        os.makedirs(args.fname)
+
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(
+        format='[%(asctime)s] - %(message)s',
+        datefmt='%Y/%m/%d %H:%M:%S',
+        level=logging.DEBUG,
+        handlers=[
+            logging.FileHandler(os.path.join(args.fname, 'eval.log' if args.eval else 'output.log')),
+            logging.StreamHandler()
+        ])
+    logger.info(args)
+
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
+
+    transforms = [Crop(32, 32), FlipLR()]
+    if args.cutout:
+        transforms.append(Cutout(args.cutout_len, args.cutout_len))
+
+    dataset = cifar10(args.data_dir, True)
+    train_set = list(zip(transpose(pad(dataset['train']['data'], 4)/255.),
+        dataset['train']['labels']))
+    train_set_x = Transform(train_set, transforms)
+    train_batches = Batches(train_set_x, args.batch_size, shuffle=True, set_random_choices=True, num_workers=2)
+
+    val_set = list(zip(transpose(dataset['val']['data']/255.), dataset['val']['labels']))
+    val_batches = Batches(val_set, args.batch_size, shuffle=False, num_workers=2)
+
+    test_set = list(zip(transpose(dataset['test']['data']/255.), dataset['test']['labels']))
+    test_batches = Batches(test_set, args.batch_size_test, shuffle=False, num_workers=2)
+
+    epsilon = (args.epsilon / 255.)
+    pgd_alpha = (args.pgd_alpha / 255.)
+
+    if args.model == 'PreActResNet18':
+        model = PreActResNet18()
+        proxy = PreActResNet18()
+    elif args.model == 'WideResNet':
+        model = WideResNet(16, 10, widen_factor=args.width_factor, dropRate=0.0)
+        proxy = WideResNet(16, 10, widen_factor=args.width_factor, dropRate=0.0)
+    else:
+        raise ValueError("Unknown model")
+
+    model = nn.DataParallel(model).cuda()
+    proxy = nn.DataParallel(proxy).cuda()
+    # model.to(device)
+    # proxy.to(device)
+
+    if args.l2:
+        decay, no_decay = [], []
+        for name,param in model.named_parameters():
+            if 'bn' not in name and 'bias' not in name:
+                decay.append(param)
+            else:
+                no_decay.append(param)
+        params = [{'params':decay, 'weight_decay':args.l2},
+                  {'params':no_decay, 'weight_decay': 0 }]
+    else:
+        params = model.parameters()
+
+    opt = torch.optim.SGD(params, lr=args.lr_max, momentum=0.9, weight_decay=5e-4)
+    proxy_opt = torch.optim.SGD(proxy.parameters(), lr=0.01)
+    awp_adversary = AdvWeightPerturb(model=model, proxy=proxy, proxy_optim=proxy_opt, gamma=args.awp_gamma)
+
+    criterion = nn.CrossEntropyLoss()
+
+    # config attack
+    if args.attack == 'free':
+        delta = torch.zeros(args.batch_size, 3, 32, 32).cuda()
+        delta.requires_grad = True
+    elif args.attack == 'fgsm' and args.fgsm_init == 'previous':
+        delta = torch.zeros(args.batch_size, 3, 32, 32).cuda()
+        delta.requires_grad = True
+    if args.attack == 'free':
+        epochs = int(math.ceil(args.epochs / args.attack_iters))
+    else:
+        epochs = args.epochs
+
+    lr_schedule = config_lr_scheduler(args)
+
+    best_val_robust_loss = math.inf
     if args.resume:
         start_epoch = args.resume
-        model.load_state_dict(torch.load(os.path.join(args.fname, f'model_{start_epoch-1}.pth')))
-        opt.load_state_dict(torch.load(os.path.join(args.fname, f'opt_{start_epoch-1}.pth')))
+        state_resumed = torch.load(os.path.join(args.fname, f'state_{start_epoch-1}.pth'))
+        model.load_state_dict(state_resumed['model_state'])
+        opt.load_state_dict(state_resumed['opt_state'])
         logger.info(f'Resuming at epoch {start_epoch}')
 
-        if os.path.exists(os.path.join(args.fname, f'model_best.pth')):
-            best_test_robust_acc = torch.load(os.path.join(args.fname, f'model_best.pth'))['test_robust_acc']
-        if args.val:
-            best_val_robust_acc = torch.load(os.path.join(args.fname, f'model_val.pth'))['val_robust_acc']
+        best_val_robust_loss = state_resumed['val_robust_loss']
     else:
         start_epoch = 0
 
@@ -303,182 +299,159 @@ def main():
             return
         logger.info("[Evaluation mode]")
 
-    logger.info('Epoch \t Train Time \t Test Time \t LR \t \t Train Loss \t Train Acc \t Train Robust Loss \t Train Robust Acc \t Test Loss \t Test Acc \t Test Robust Loss \t Test Robust Acc')
-    for epoch in range(start_epoch, epochs):
-        start_time = time.time()
-        train_loss = 0
-        train_acc = 0
-        train_robust_loss = 0
-        train_robust_acc = 0
-        train_n = 0
-        for i, batch in enumerate(train_batches):
-            if args.eval:
-                break
-            X, y = batch['input'], batch['target']
-            if args.mixup:
-                X, y_a, y_b, lam = mixup_data(X, y, args.mixup_alpha)
-                X, y_a, y_b = map(Variable, (X, y_a, y_b))
-            lr = lr_schedule(epoch + (i + 1) / len(train_batches))
-            opt.param_groups[0].update(lr=lr)
-
-            if args.attack == 'pgd':
-                # Random initialization
-                if args.mixup:
-                    delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters, args.restarts, args.norm, mixup=True, y_a=y_a, y_b=y_b, lam=lam)
-                else:
-                    delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters, args.restarts, args.norm)
-                delta = delta.detach()
-            elif args.attack == 'fgsm':
-                delta = attack_pgd(model, X, y, epsilon, args.fgsm_alpha*epsilon, 1, 1, args.norm)
-            # Standard training
-            elif args.attack == 'none':
-                delta = torch.zeros_like(X)
-            X_adv = normalize(torch.clamp(X + delta[:X.size(0)], min=lower_limit, max=upper_limit))
-
+    if not args.eval:
+        logger.info(f'{"="*20} Train {"="*20}')
+        logger.info('Epoch \t Time Elapse \t LR \t \t Loss \t Acc \t Robust Loss \t Robust Acc')
+        for epoch in range(start_epoch, epochs):
+            start_time = time.time()
+            train_loss = 0
+            train_acc = 0
+            train_robust_loss = 0
+            train_robust_acc = 0
+            train_n = 0
             model.train()
-            # calculate adversarial weight perturbation and perturb it
-            if epoch >= args.awp_warmup:
-                # not compatible to mixup currently.
-                assert (not args.mixup)
-                awp = awp_adversary.calc_awp(inputs_adv=X_adv,
-                                             targets=y)
-                awp_adversary.perturb(awp)
-
-            robust_output = model(X_adv)
-            if args.mixup:
-                robust_loss = mixup_criterion(criterion, robust_output, y_a, y_b, lam)
-            else:
-                robust_loss = criterion(robust_output, y)
-
-            if args.l1:
-                for name,param in model.named_parameters():
-                    if 'bn' not in name and 'bias' not in name:
-                        robust_loss += args.l1*param.abs().sum()
-
-            opt.zero_grad()
-            robust_loss.backward()
-            opt.step()
-
-            if epoch >= args.awp_warmup:
-                awp_adversary.restore(awp)
-
-            output = model(normalize(X))
-            if args.mixup:
-                loss = mixup_criterion(criterion, output, y_a, y_b, lam)
-            else:
-                loss = criterion(output, y)
-
-            train_robust_loss += robust_loss.item() * y.size(0)
-            train_robust_acc += (robust_output.max(1)[1] == y).sum().item()
-            train_loss += loss.item() * y.size(0)
-            train_acc += (output.max(1)[1] == y).sum().item()
-            train_n += y.size(0)
-
-        train_time = time.time()
-
-        model.eval()
-        test_loss = 0
-        test_acc = 0
-        test_robust_loss = 0
-        test_robust_acc = 0
-        test_n = 0
-        for i, batch in enumerate(test_batches):
-            X, y = batch['input'], batch['target']
-
-            # Random initialization
-            if args.attack == 'none':
-                delta = torch.zeros_like(X)
-            else:
-                delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters_test, args.restarts, args.norm, early_stop=args.eval)
-            delta = delta.detach()
-
-            robust_output = model(normalize(torch.clamp(X + delta[:X.size(0)], min=lower_limit, max=upper_limit)))
-            robust_loss = criterion(robust_output, y)
-
-            output = model(normalize(X))
-            loss = criterion(output, y)
-
-            test_robust_loss += robust_loss.item() * y.size(0)
-            test_robust_acc += (robust_output.max(1)[1] == y).sum().item()
-            test_loss += loss.item() * y.size(0)
-            test_acc += (output.max(1)[1] == y).sum().item()
-            test_n += y.size(0)
-
-        test_time = time.time()
-
-        if args.val:
-            val_loss = 0
-            val_acc = 0
-            val_robust_loss = 0
-            val_robust_acc = 0
-            val_n = 0
-            for i, batch in enumerate(val_batches):
+            for i, batch in enumerate(tqdm(train_batches)):
                 X, y = batch['input'], batch['target']
+                if args.mixup:
+                    X, y_a, y_b, lam = mixup_data(X, y, args.mixup_alpha)
+                    X, y_a, y_b = map(Variable, (X, y_a, y_b))
+                lr = lr_schedule(epoch + (i + 1) / len(train_batches))
+                opt.param_groups[0].update(lr=lr)
 
-                # Random initialization
-                if args.attack == 'none':
+                if args.attack == 'pgd':
+                    # Random initialization
+                    if args.mixup:
+                        delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters, args.restarts, args.norm, mixup=True, y_a=y_a, y_b=y_b, lam=lam)
+                    else:
+                        delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters, args.restarts, args.norm)
+                    delta = delta.detach()
+                elif args.attack == 'fgsm':
+                    delta = attack_pgd(model, X, y, epsilon, args.fgsm_alpha*epsilon, 1, 1, args.norm)
+                # Standard training
+                elif args.attack == 'none':
                     delta = torch.zeros_like(X)
-                else:
-                    delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters_test, args.restarts, args.norm, early_stop=args.eval)
-                delta = delta.detach()
+                X_adv = normalize(torch.clamp(X + delta[:X.size(0)], min=lower_limit, max=upper_limit))
 
-                robust_output = model(normalize(torch.clamp(X + delta[:X.size(0)], min=lower_limit, max=upper_limit)))
-                robust_loss = criterion(robust_output, y)
+                # calculate adversarial weight perturbation and perturb it
+                if epoch >= args.awp_warmup:
+                    # not compatible to mixup currently.
+                    assert (not args.mixup)
+                    awp = awp_adversary.calc_awp(inputs_adv=X_adv,
+                                                targets=y)
+                    awp_adversary.perturb(awp)
+
+                robust_output = model(X_adv)
+                if args.mixup:
+                    robust_loss = mixup_criterion(criterion, robust_output, y_a, y_b, lam)
+                else:
+                    robust_loss = criterion(robust_output, y)
+
+                # L1 regularization
+                if args.l1:
+                    for name,param in model.named_parameters():
+                        if 'bn' not in name and 'bias' not in name:
+                            robust_loss += args.l1*param.abs().sum()
+
+                opt.zero_grad()
+                robust_loss.backward()
+                opt.step()
+
+                if epoch >= args.awp_warmup:
+                    awp_adversary.restore(awp)
 
                 output = model(normalize(X))
-                loss = criterion(output, y)
+                if args.mixup:
+                    loss = mixup_criterion(criterion, output, y_a, y_b, lam)
+                else:
+                    loss = criterion(output, y)
 
-                val_robust_loss += robust_loss.item() * y.size(0)
-                val_robust_acc += (robust_output.max(1)[1] == y).sum().item()
-                val_loss += loss.item() * y.size(0)
-                val_acc += (output.max(1)[1] == y).sum().item()
-                val_n += y.size(0)
+                train_robust_loss += robust_loss.item() * y.size(0)
+                train_robust_acc += (robust_output.max(1)[1] == y).sum().item()
+                train_loss += loss.item() * y.size(0)
+                train_acc += (output.max(1)[1] == y).sum().item()
+                train_n += y.size(0)
 
-        if not args.eval:
-            logger.info('%d \t %.1f \t \t %.1f \t \t %.4f \t %.4f \t %.4f \t %.4f \t \t %.4f \t \t %.4f \t %.4f \t %.4f \t \t %.4f',
-                epoch, train_time - start_time, test_time - train_time, lr,
-                train_loss/train_n, train_acc/train_n, train_robust_loss/train_n, train_robust_acc/train_n,
-                test_loss/test_n, test_acc/test_n, test_robust_loss/test_n, test_robust_acc/test_n)
+            train_time = time.time()
+            logger.info('%d \t %.1f \t \t %.4f \t %.4f \t %.4f \t %.4f \t \t %.4f',
+                epoch, train_time - start_time, lr,
+                train_loss/train_n, train_acc/train_n, train_robust_loss/train_n, train_robust_acc/train_n)
 
-            if args.val:
-                logger.info('validation %.4f \t %.4f \t %.4f \t %.4f',
-                    val_loss/val_n, val_acc/val_n, val_robust_loss/val_n, val_robust_acc/val_n)
-
-                if val_robust_acc/val_n > best_val_robust_acc:
-                    torch.save({
-                            'state_dict':model.state_dict(),
-                            'test_robust_acc':test_robust_acc/test_n,
-                            'test_robust_loss':test_robust_loss/test_n,
-                            'test_loss':test_loss/test_n,
-                            'test_acc':test_acc/test_n,
-                            'val_robust_acc':val_robust_acc/val_n,
-                            'val_robust_loss':val_robust_loss/val_n,
-                            'val_loss':val_loss/val_n,
-                            'val_acc':val_acc/val_n,
-                        }, os.path.join(args.fname, f'model_val.pth'))
-                    best_val_robust_acc = val_robust_acc/val_n
-
-            # save checkpoint
+            # save checkpoint upon validation
             if (epoch+1) % args.chkpt_iters == 0 or epoch+1 == epochs:
-                torch.save(model.state_dict(), os.path.join(args.fname, f'model_{epoch}.pth'))
-                torch.save(opt.state_dict(), os.path.join(args.fname, f'opt_{epoch}.pth'))
+                model.eval()
 
-            # save best
-            if test_robust_acc/test_n > best_test_robust_acc:
-                torch.save({
-                        'state_dict':model.state_dict(),
-                        'test_robust_acc':test_robust_acc/test_n,
-                        'test_robust_loss':test_robust_loss/test_n,
-                        'test_loss':test_loss/test_n,
-                        'test_acc':test_acc/test_n,
-                    }, os.path.join(args.fname, f'model_best.pth'))
-                best_test_robust_acc = test_robust_acc/test_n
+                val_loss = 0
+                val_acc = 0
+                val_robust_loss = 0
+                val_robust_acc = 0
+                val_n = 0
+                for i, batch in enumerate(tqdm(val_batches)):
+                    X, y = batch['input'], batch['target']
+
+                    # Random initialization
+                    if args.attack == 'none':
+                        delta = torch.zeros_like(X)
+                    else:
+                        delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters_test, args.restarts, args.norm, early_stop=args.eval)
+                    delta = delta.detach()
+
+                    robust_output = model(normalize(torch.clamp(X + delta[:X.size(0)], min=lower_limit, max=upper_limit)))
+                    robust_loss = criterion(robust_output, y)
+
+                    output = model(normalize(X))
+                    loss = criterion(output, y)
+
+                    val_robust_loss += robust_loss.item() * y.size(0)
+                    val_robust_acc += (robust_output.max(1)[1] == y).sum().item()
+                    val_loss += loss.item() * y.size(0)
+                    val_acc += (output.max(1)[1] == y).sum().item()
+                    val_n += y.size(0)
+
+                logger.info(f'{"="*20} Validation {"="*20}')
+                logger.info('Loss \t Acc \t Robust Loss \t Robust Acc')
+                logger.info('%.4f \t %.4f \t %.4f \t %.4f', val_loss/val_n, val_acc/val_n, val_robust_loss/val_n, val_robust_acc/val_n)
+
+                if val_robust_loss/val_n < best_val_robust_loss:
+                    torch.save({
+                            'model_state':model.state_dict(),
+                            'opt_state':opt.state_dict(),
+                            'val_robust_acc':val_robust_acc/val_n,
+                            'val_robust_loss':val_robust_loss/val_n
+                        }, os.path.join(args.fname, f'state_{epoch}.pth'))
+                    best_val_robust_loss = val_robust_loss/val_n
+        logger.info('Finish Training')
+
+    model.eval()
+    test_loss = 0
+    test_acc = 0
+    test_robust_loss = 0
+    test_robust_acc = 0
+    test_n = 0
+    for i, batch in enumerate(tqdm(test_batches)):
+        X, y = batch['input'], batch['target']
+
+        # Random initialization
+        if args.attack == 'none':
+            delta = torch.zeros_like(X)
         else:
-            logger.info('%d \t %.1f \t \t %.1f \t \t %.4f \t %.4f \t %.4f \t %.4f \t \t %.4f \t \t %.4f \t %.4f \t %.4f \t \t %.4f',
-                epoch, train_time - start_time, test_time - train_time, -1,
-                -1, -1, -1, -1,
-                test_loss/test_n, test_acc/test_n, test_robust_loss/test_n, test_robust_acc/test_n)
-            return
+            delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters_test, args.restarts, args.norm, early_stop=args.eval)
+        delta = delta.detach()
+
+        robust_output = model(normalize(torch.clamp(X + delta[:X.size(0)], min=lower_limit, max=upper_limit)))
+        robust_loss = criterion(robust_output, y)
+
+        output = model(normalize(X))
+        loss = criterion(output, y)
+
+        test_robust_loss += robust_loss.item() * y.size(0)
+        test_robust_acc += (robust_output.max(1)[1] == y).sum().item()
+        test_loss += loss.item() * y.size(0)
+        test_acc += (output.max(1)[1] == y).sum().item()
+        test_n += y.size(0)
+
+    logger.info(f'{"="*20} Test {"="*20}')
+    logger.info('Loss \t Acc \t Robust Loss \t Robust Acc')
+    logger.info('%.4f \t %.4f \t %.4f \t %.4f', test_loss/test_n, test_acc/test_n, test_robust_loss/test_n, test_robust_acc/test_n)
 
 
 if __name__ == "__main__":
