@@ -1,5 +1,6 @@
 import argparse
 import logging
+import pdb
 import sys
 import time
 import math
@@ -146,7 +147,7 @@ def get_args():
     parser.add_argument('--restarts', default=1, type=int)
     parser.add_argument('--pgd-alpha', default=2, type=float)
     parser.add_argument('--fgsm-alpha', default=12, type=float)
-    parser.add_argument('--norm', default='l_2', type=str, choices=['l_inf', 'l_2'])
+    parser.add_argument('--norm', default='l_inf', type=str, choices=['l_inf', 'l_2'])
     parser.add_argument('--fgsm-init', default='random', choices=['zero', 'random', 'previous'])
     parser.add_argument('--fname', default='cifar_model', type=str)
     parser.add_argument('--seed', default=0, type=int)
@@ -239,8 +240,8 @@ def main():
         model = PreActResNet18()
         proxy = PreActResNet18()
     elif args.model == 'WideResNet':
-        model = WideResNet(16, 10, widen_factor=args.width_factor, dropRate=0.0)
-        proxy = WideResNet(16, 10, widen_factor=args.width_factor, dropRate=0.0)
+        model = WideResNet(28, 10, widen_factor=args.width_factor, dropRate=0.0)
+        proxy = WideResNet(28, 10, widen_factor=args.width_factor, dropRate=0.0)
     else:
         raise ValueError("Unknown model")
 
