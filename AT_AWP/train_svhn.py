@@ -1,8 +1,10 @@
 import argparse
 import logging
+import pdb
 import sys
 import time
 import math
+from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -10,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 from torchvision import datasets, transforms
-
+from torch.utils.data import random_split
 import os
 
 from wideresnet import WideResNet
@@ -109,7 +111,7 @@ def get_args():
     parser.add_argument('--l2', default=0, type=float)
     parser.add_argument('--l1', default=0, type=float)
     parser.add_argument('--batch-size', default=128, type=int)
-    parser.add_argument('--data-dir', default='../svhn-data', type=str)
+    parser.add_argument('--data-dir', default='./svhn-data', type=str)
     parser.add_argument('--epochs', default=200, type=int)
     parser.add_argument('--lr-schedule', default='piecewise', choices=['superconverge', 'piecewise'])
     parser.add_argument('--lr-max', default=0.01, type=float)
@@ -173,12 +175,29 @@ def main():
         args.data_dir, split='train', transform=train_transform, download=True)
     test_dataset = datasets.SVHN(
         args.data_dir, split='test', transform=test_transform, download=True)
+
+    val_ratio = 0.2
+    length = len(train_dataset)
+    train_length = int((1 - val_ratio) * length)
+    # train_indices, val_indices = [subset.indices for subset in random_split(train_dataset, [train_length, length - train_length])]
+    train_dataset, val_set = random_split(train_dataset, [train_length, length - train_length])
+
+    # pdb.set_trace()
+
+    # split train and validation
     train_loader = torch.utils.data.DataLoader(
         dataset=train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         pin_memory=True,
         num_workers=num_workers,
+    )
+    val_loader = torch.utils.data.DataLoader(
+        dataset=val_set,
+        batch_size=args.batch_size,
+        shuffle=False,
+        pin_memory=True,
+        num_workers=2,
     )
     test_loader = torch.utils.data.DataLoader(
         dataset=test_dataset,
@@ -237,14 +256,15 @@ def main():
             else:
                 return args.lr_max / 100.
 
-    best_test_robust_acc = 0
+    best_val_robust_loss = math.inf
     if args.resume:
         start_epoch = args.resume
-        model.load_state_dict(torch.load(os.path.join(args.fname, f'model_{start_epoch-1}.pth')))
-        opt.load_state_dict(torch.load(os.path.join(args.fname, f'opt_{start_epoch-1}.pth')))
+        state_resumed = torch.load(os.path.join(args.fname, f'state_{start_epoch-1}.pth'))
+        model.load_state_dict(state_resumed['model_state'])
+        opt.load_state_dict(state_resumed['opt_state'])
         logger.info(f'Resuming at epoch {start_epoch}')
-        if os.path.exists(os.path.join(args.fname, f'model_best.pth')):
-            best_test_robust_acc = torch.load(os.path.join(args.fname, f'model_best.pth'))['test_robust_acc']
+
+        best_val_robust_loss = state_resumed['val_robust_loss']
     else:
         start_epoch = 0
 
@@ -254,134 +274,162 @@ def main():
             return
         logger.info("[Evaluation mode]")
 
-    logger.info('Epoch \t Train Time \t Test Time \t LR \t \t Train Loss \t Train Acc \t Train Robust Loss \t Train Robust Acc \t Test Loss \t Test Acc \t Test Robust Loss \t Test Robust Acc')
-    for epoch in range(start_epoch, epochs):
-        model.train()
-        start_time = time.time()
-        train_loss = 0
-        train_acc = 0
-        train_robust_loss = 0
-        train_robust_acc = 0
-        train_n = 0
-        for i, (X, y) in enumerate(train_loader):
-            if args.eval:
-                break
-            X, y = X.cuda(), y.cuda()
-            if args.mixup:
-                X, y_a, y_b, lam = mixup_data(X, y, args.mixup_alpha)
-                X, y_a, y_b = map(Variable, (X, y_a, y_b))
-            lr = lr_schedule(epoch + (i + 1) / len(train_loader))
-            opt.param_groups[0].update(lr=lr)
-
-            if args.attack == 'pgd':
-                # Random initialization
-                if args.mixup:
-                    delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters, args.restarts, args.norm, mixup=True, y_a=y_a, y_b=y_b, lam=lam)
-                else:
-                    delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters, args.restarts, args.norm)
-                delta = delta.detach()
-
-            # Standard training
-            elif args.attack == 'none':
-                delta = torch.zeros_like(X)
-            X_adv = normalize(torch.clamp(X + delta[:X.size(0)], min=lower_limit, max=upper_limit))
-
+    if not args.eval:
+        logger.info(f'{"="*20} Train {"="*20}')
+        logger.info('Epoch \t Time Elapse \t LR \t \t Loss \t Acc \t Robust Loss \t Robust Acc')
+        for epoch in range(start_epoch, epochs):
             model.train()
-            # calculate adversarial weight perturbation and perturb it
-            if epoch >= args.awp_warmup:
-                # not compatible to mixup currently.
-                assert (not args.mixup)
-                awp = awp_adversary.calc_awp(inputs_adv=X_adv,
-                                             targets=y)
-                awp_adversary.perturb(awp)
+            start_time = time.time()
+            train_loss = 0
+            train_acc = 0
+            train_robust_loss = 0
+            train_robust_acc = 0
+            train_n = 0
+            for i, (X, y) in enumerate(tqdm(train_loader)):
+                X, y = X.cuda(), y.cuda()
+                if args.mixup:
+                    X, y_a, y_b, lam = mixup_data(X, y, args.mixup_alpha)
+                    X, y_a, y_b = map(Variable, (X, y_a, y_b))
+                lr = lr_schedule(epoch + (i + 1) / len(train_loader))
+                opt.param_groups[0].update(lr=lr)
 
-            robust_output = model(X_adv)
-            if args.mixup:
-                robust_loss = mixup_criterion(criterion, robust_output, y_a, y_b, lam)
-            else:
-                robust_loss = criterion(robust_output, y)
+                if args.attack == 'pgd':
+                    # Random initialization
+                    if args.mixup:
+                        delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters, args.restarts, args.norm, mixup=True, y_a=y_a, y_b=y_b, lam=lam)
+                    else:
+                        delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters, args.restarts, args.norm)
+                    delta = delta.detach()
 
-            if args.l1:
-                for name,param in model.named_parameters():
-                    if 'bn' not in name and 'bias' not in name:
-                        robust_loss += args.l1*param.abs().sum()
+                # Standard training
+                elif args.attack == 'none':
+                    delta = torch.zeros_like(X)
+                X_adv = normalize(torch.clamp(X + delta[:X.size(0)], min=lower_limit, max=upper_limit))
 
-            opt.zero_grad()
-            robust_loss.backward()
-            opt.step()
+                model.train()
+                # calculate adversarial weight perturbation and perturb it
+                if epoch >= args.awp_warmup:
+                    # not compatible to mixup currently.
+                    assert (not args.mixup)
+                    awp = awp_adversary.calc_awp(inputs_adv=X_adv,
+                                                targets=y)
+                    awp_adversary.perturb(awp)
 
-            if epoch >= args.awp_warmup:
-                awp_adversary.restore(awp)
+                robust_output = model(X_adv)
+                if args.mixup:
+                    robust_loss = mixup_criterion(criterion, robust_output, y_a, y_b, lam)
+                else:
+                    robust_loss = criterion(robust_output, y)
 
-            output = model(normalize(X))
-            if args.mixup:
-                loss = mixup_criterion(criterion, output, y_a, y_b, lam)
-            else:
-                loss = criterion(output, y)
+                if args.l1:
+                    for name,param in model.named_parameters():
+                        if 'bn' not in name and 'bias' not in name:
+                            robust_loss += args.l1*param.abs().sum()
 
-            train_robust_loss += robust_loss.item() * y.size(0)
-            train_robust_acc += (robust_output.max(1)[1] == y).sum().item()
-            train_loss += loss.item() * y.size(0)
-            train_acc += (output.max(1)[1] == y).sum().item()
-            train_n += y.size(0)
+                opt.zero_grad()
+                robust_loss.backward()
+                opt.step()
 
-        train_time = time.time()
+                if epoch >= args.awp_warmup:
+                    awp_adversary.restore(awp)
 
-        model.eval()
-        test_loss = 0
-        test_acc = 0
-        test_robust_loss = 0
-        test_robust_acc = 0
-        test_n = 0
-        for i, (X, y) in enumerate(test_loader):
-            X, y = X.cuda(), y.cuda()
+                output = model(normalize(X))
+                if args.mixup:
+                    loss = mixup_criterion(criterion, output, y_a, y_b, lam)
+                else:
+                    loss = criterion(output, y)
 
-            # Random initialization
-            if args.attack == 'none':
-                delta = torch.zeros_like(X)
-            else:
-                delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters_test, args.restarts, args.norm, early_stop=args.eval)
-            delta = delta.detach()
+                train_robust_loss += robust_loss.item() * y.size(0)
+                train_robust_acc += (robust_output.max(1)[1] == y).sum().item()
+                train_loss += loss.item() * y.size(0)
+                train_acc += (output.max(1)[1] == y).sum().item()
+                train_n += y.size(0)
 
-            robust_output = model(normalize(torch.clamp(X + delta[:X.size(0)], min=lower_limit, max=upper_limit)))
-            robust_loss = criterion(robust_output, y)
+            train_time = time.time()
 
-            output = model(normalize(X))
-            loss = criterion(output, y)
+            logger.info('%d \t %.1f \t \t %.4f \t %.4f \t %.4f \t %.4f \t \t %.4f',
+                epoch, train_time - start_time, lr,
+                train_loss/train_n, train_acc/train_n, train_robust_loss/train_n, train_robust_acc/train_n)
 
-            test_robust_loss += robust_loss.item() * y.size(0)
-            test_robust_acc += (robust_output.max(1)[1] == y).sum().item()
-            test_loss += loss.item() * y.size(0)
-            test_acc += (output.max(1)[1] == y).sum().item()
-            test_n += y.size(0)
-
-        test_time = time.time()
-        if not args.eval: 
-            logger.info('%d \t %.1f \t \t %.1f \t \t %.4f \t %.4f \t %.4f \t %.4f \t \t %.4f \t \t %.4f \t %.4f \t %.4f \t \t %.4f',
-                epoch, train_time - start_time, test_time - train_time, lr,
-                train_loss/train_n, train_acc/train_n, train_robust_loss/train_n, train_robust_acc/train_n,
-                test_loss/test_n, test_acc/test_n, test_robust_loss/test_n, test_robust_acc/test_n)
-            
+            # save checkpoint upon validation
             if (epoch+1) % args.chkpt_iters == 0 or epoch+1 == epochs:
-                torch.save(model.state_dict(), os.path.join(args.fname, f'model_{epoch}.pth'))
-                torch.save(opt.state_dict(), os.path.join(args.fname, f'opt_{epoch}.pth'))
+                model.eval()
 
-            # save best
-            if test_robust_acc / test_n > best_test_robust_acc:
-                torch.save({
-                    'state_dict': model.state_dict(),
-                    'test_robust_acc': test_robust_acc / test_n,
-                    'test_robust_loss': test_robust_loss / test_n,
-                    'test_loss': test_loss / test_n,
-                    'test_acc': test_acc / test_n,
-                }, os.path.join(args.fname, f'model_best.pth'))
-                best_test_robust_acc = test_robust_acc / test_n
+                val_loss = 0
+                val_acc = 0
+                val_robust_loss = 0
+                val_robust_acc = 0
+                val_n = 0
+
+                for i, (X, y) in enumerate(tqdm(val_loader)):
+                    X, y = X.cuda(), y.cuda()
+
+                    # Random initialization
+                    if args.attack == 'none':
+                        delta = torch.zeros_like(X)
+                    else:
+                        delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters_test, args.restarts, args.norm, early_stop=args.eval)
+                    delta = delta.detach()
+
+                    robust_output = model(normalize(torch.clamp(X + delta[:X.size(0)], min=lower_limit, max=upper_limit)))
+                    robust_loss = criterion(robust_output, y)
+
+                    output = model(normalize(X))
+                    loss = criterion(output, y)
+
+                    val_robust_loss += robust_loss.item() * y.size(0)
+                    val_robust_acc += (robust_output.max(1)[1] == y).sum().item()
+                    val_loss += loss.item() * y.size(0)
+                    val_acc += (output.max(1)[1] == y).sum().item()
+                    val_n += y.size(0)
+
+                logger.info(f'{"="*20} Validation {"="*20}')
+                logger.info('Loss \t Acc \t Robust Loss \t Robust Acc')
+                logger.info('%.4f \t %.4f \t %.4f \t %.4f', val_loss/val_n, val_acc/val_n, val_robust_loss/val_n, val_robust_acc/val_n)
+
+                if val_robust_loss/val_n < best_val_robust_loss:
+                    torch.save({
+                            'model_state':model.state_dict(),
+                            'opt_state':opt.state_dict(),
+                            'val_robust_acc':val_robust_acc/val_n,
+                            'val_robust_loss':val_robust_loss/val_n
+                        }, os.path.join(args.fname, f'state_{epoch}.pth'))
+                    best_val_robust_loss = val_robust_loss/val_n
+        logger.info('Finish Training')
+
+
+    model.eval()
+    test_loss = 0
+    test_acc = 0
+    test_robust_loss = 0
+    test_robust_acc = 0
+    test_n = 0
+    for i, (X, y) in enumerate(tqdm(test_loader)):
+        X, y = X.cuda(), y.cuda()
+
+        # Random initialization
+        if args.attack == 'none':
+            delta = torch.zeros_like(X)
         else:
-            logger.info('%d \t %.1f \t \t %.1f \t \t %.4f \t %.4f \t %.4f \t %.4f \t \t %.4f \t \t %.4f \t %.4f \t %.4f \t \t %.4f',
-                epoch, train_time - start_time, test_time - train_time, -1,
-                -1, -1, -1, -1,
-                test_loss/test_n, test_acc/test_n, test_robust_loss/test_n, test_robust_acc/test_n)
-            return
+            delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters_test, args.restarts, args.norm, early_stop=args.eval)
+        delta = delta.detach()
+
+        robust_output = model(normalize(torch.clamp(X + delta[:X.size(0)], min=lower_limit, max=upper_limit)))
+        robust_loss = criterion(robust_output, y)
+
+        output = model(normalize(X))
+        loss = criterion(output, y)
+
+        test_robust_loss += robust_loss.item() * y.size(0)
+        test_robust_acc += (robust_output.max(1)[1] == y).sum().item()
+        test_loss += loss.item() * y.size(0)
+        test_acc += (output.max(1)[1] == y).sum().item()
+        test_n += y.size(0)
+
+    logger.info(f'{"="*20} Test {"="*20}')
+    logger.info('Loss \t Acc \t Robust Loss \t Robust Acc')
+    logger.info('%.4f \t %.4f \t %.4f \t %.4f', test_loss/test_n, test_acc/test_n, test_robust_loss/test_n, test_robust_acc/test_n)
+
 
 
 if __name__ == "__main__":

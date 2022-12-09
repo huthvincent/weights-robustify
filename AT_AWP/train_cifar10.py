@@ -92,7 +92,7 @@ def attack_pgd(model, X, y, epsilon, alpha, attack_iters, restarts,
         for _ in range(attack_iters):
             output = model(normalize(X + delta))
             if early_stop:
-                # 只对 正确分类的 构造 对抗样本
+                # only construct adversarial samples for the correctly-classified
                 index = torch.where(output.max(1)[1] == y)[0]
             else:
                 index = slice(None,None,None)
@@ -275,10 +275,6 @@ def main():
     elif args.attack == 'fgsm' and args.fgsm_init == 'previous':
         delta = torch.zeros(args.batch_size, 3, 32, 32).cuda()
         delta.requires_grad = True
-    if args.attack == 'free':
-        epochs = int(math.ceil(args.epochs / args.attack_iters))
-    else:
-        epochs = args.epochs
 
     lr_schedule = config_lr_scheduler(args)
 
@@ -293,6 +289,8 @@ def main():
         best_val_robust_loss = state_resumed['val_robust_loss']
     else:
         start_epoch = 0
+
+    epochs = args.epochs + start_epoch
 
     if args.eval:
         if not args.resume:
