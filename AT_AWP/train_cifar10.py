@@ -333,6 +333,7 @@ def main():
                     delta = torch.zeros_like(X)
                 X_adv = normalize(torch.clamp(X + delta[:X.size(0)], min=lower_limit, max=upper_limit))
 
+                #############################################################
                 # calculate adversarial weight perturbation and perturb it
                 if epoch >= args.awp_warmup:
                     # not compatible to mixup currently.
@@ -340,6 +341,7 @@ def main():
                     awp = awp_adversary.calc_awp(inputs_adv=X_adv,
                                                 targets=y)
                     awp_adversary.perturb(awp)
+                #############################################################
 
                 robust_output = model(X_adv)
                 if args.mixup:
@@ -357,8 +359,11 @@ def main():
                 robust_loss.backward()
                 opt.step()
 
+                #############################################################
+                # restore perturbed weights
                 if epoch >= args.awp_warmup:
                     awp_adversary.restore(awp)
+                #############################################################
 
                 output = model(normalize(X))
                 if args.mixup:
