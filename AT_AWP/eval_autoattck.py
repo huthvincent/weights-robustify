@@ -49,11 +49,11 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint', type=str, default='./model_test.pt')
     parser.add_argument('--data', type=str, default='CIFAR10', choices=['CIFAR10', 'CIFAR100'],
                         help='Which dataset the eval is on')
-    parser.add_argument('--data_dir', type=str, default='./cifar-data')
+    parser.add_argument('--data_dir', type=str, default='./data/cifar-data')
     parser.add_argument('--preprocess', type=str, default='meanstd',
                         choices=['meanstd', '01', '+-1'], help='The preprocess for data')
     parser.add_argument('--norm', type=str, default='Linf', choices=['L2', 'Linf'])
-    parser.add_argument('--epsilon', type=float, default=8./255.)
+    parser.add_argument('--epsilon', type=eval, default=8./255.)
 
     parser.add_argument('--n_ex', type=int, default=10000)
     parser.add_argument('--individual', default=False, action='store_true')
