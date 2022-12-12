@@ -141,7 +141,7 @@ def get_args():
     parser.add_argument('--lr-one-drop', default=0.01, type=float)
     parser.add_argument('--lr-drop-epoch', default=100, type=int)
     parser.add_argument('--attack', default='pgd', type=str, choices=['pgd', 'fgsm', 'free', 'none'])
-    parser.add_argument('--epsilon', default=128, type=int)
+    parser.add_argument('--epsilon', default=8, type=int)
     parser.add_argument('--attack-iters', default=10, type=int)
     parser.add_argument('--attack-iters-test', default=20, type=int)
     parser.add_argument('--restarts', default=1, type=int)
@@ -150,7 +150,7 @@ def get_args():
     parser.add_argument('--norm', default='l_inf', type=str, choices=['l_inf', 'l_2'])
     parser.add_argument('--fgsm-init', default='random', choices=['zero', 'random', 'previous'])
     parser.add_argument('--fname', default='cifar_model', type=str)
-    parser.add_argument('--seed', default=0, type=int)
+    parser.add_argument('--seed', default=2022, type=int)
     parser.add_argument('--half', action='store_true')
     parser.add_argument('--width-factor', default=10, type=int)
     parser.add_argument('--resume', default=0, type=int)
@@ -200,7 +200,7 @@ def main():
         args.awp_warmup = np.infty
 
     # redirect output to ./output directory
-    args.fname = os.path.join('./output', args.fname)
+    args.fname = os.path.join('./output', args.fname, str(args.seed))
     if not os.path.exists(args.fname):
         os.makedirs(args.fname)
 
@@ -223,14 +223,11 @@ def main():
     if args.cutout:
         transforms.append(Cutout(args.cutout_len, args.cutout_len))
 
-    dataset = cifar10(args.data_dir, True)
+    dataset = cifar10(args.data_dir)
     train_set = list(zip(transpose(pad(dataset['train']['data'], 4)/255.),
         dataset['train']['labels']))
     train_set_x = Transform(train_set, transforms)
     train_batches = Batches(train_set_x, args.batch_size, shuffle=True, set_random_choices=True, num_workers=2)
-
-    val_set = list(zip(transpose(dataset['val']['data']/255.), dataset['val']['labels']))
-    val_batches = Batches(val_set, args.batch_size, shuffle=False, num_workers=2)
 
     test_set = list(zip(transpose(dataset['test']['data']/255.), dataset['test']['labels']))
     test_batches = Batches(test_set, args.batch_size_test, shuffle=False, num_workers=2)
@@ -280,15 +277,15 @@ def main():
 
     lr_schedule = config_lr_scheduler(args)
 
-    best_val_robust_loss = math.inf
+    best_train_robust_loss = math.inf
     if args.resume:
-        start_epoch = args.resume
-        state_resumed = torch.load(os.path.join(args.fname, f'state_{start_epoch-1}.pth'))
+        state_resumed = torch.load(os.path.join(args.fname, 'state.pth'))
         model.load_state_dict(state_resumed['model_state'])
         opt.load_state_dict(state_resumed['opt_state'])
+        start_epoch = state_resumed['epoch']
         logger.info(f'Resuming at epoch {start_epoch}')
 
-        best_val_robust_loss = state_resumed['val_robust_loss']
+        best_train_robust_loss = state_resumed['train_robust_loss']
     else:
         start_epoch = 0
 
@@ -383,48 +380,16 @@ def main():
                 train_loss/train_n, train_acc/train_n, train_robust_loss/train_n, train_robust_acc/train_n)
 
             # save checkpoint upon validation
-            if (epoch+1) % args.chkpt_iters == 0 or epoch+1 == epochs:
-                model.eval()
-
-                val_loss = 0
-                val_acc = 0
-                val_robust_loss = 0
-                val_robust_acc = 0
-                val_n = 0
-                for i, batch in enumerate(tqdm(val_batches)):
-                    X, y = batch['input'], batch['target']
-
-                    # Random initialization
-                    if args.attack == 'none':
-                        delta = torch.zeros_like(X)
-                    else:
-                        delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters_test, args.restarts, args.norm, early_stop=args.eval)
-                    delta = delta.detach()
-
-                    robust_output = model(normalize(torch.clamp(X + delta[:X.size(0)], min=lower_limit, max=upper_limit)))
-                    robust_loss = criterion(robust_output, y)
-
-                    output = model(normalize(X))
-                    loss = criterion(output, y)
-
-                    val_robust_loss += robust_loss.item() * y.size(0)
-                    val_robust_acc += (robust_output.max(1)[1] == y).sum().item()
-                    val_loss += loss.item() * y.size(0)
-                    val_acc += (output.max(1)[1] == y).sum().item()
-                    val_n += y.size(0)
-
-                logger.info(f'{"="*20} Validation {"="*20}')
-                logger.info('Loss \t Acc \t Robust Loss \t Robust Acc')
-                logger.info('%.4f \t %.4f \t %.4f \t %.4f', val_loss/val_n, val_acc/val_n, val_robust_loss/val_n, val_robust_acc/val_n)
-
-                if val_robust_loss/val_n < best_val_robust_loss:
-                    torch.save({
-                            'model_state':model.state_dict(),
-                            'opt_state':opt.state_dict(),
-                            'val_robust_acc':val_robust_acc/val_n,
-                            'val_robust_loss':val_robust_loss/val_n
-                        }, os.path.join(args.fname, f'state_{epoch}.pth'))
-                    best_val_robust_loss = val_robust_loss/val_n
+            if train_robust_loss/train_n < best_train_robust_loss:
+                logger.info('Saving model')
+                torch.save({
+                        'model_state':model.state_dict(),
+                        'opt_state':opt.state_dict(),
+                        'train_robust_acc':train_robust_acc/train_n,
+                        'train_robust_loss':train_robust_loss/train_n,
+                        'epoch': epoch
+                    }, os.path.join(args.fname, 'state.pth'))
+                best_train_robust_loss = train_robust_loss/train_n
         logger.info('Finish Training')
 
     model.eval()

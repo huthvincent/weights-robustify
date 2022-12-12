@@ -59,7 +59,6 @@ if __name__ == '__main__':
     parser.add_argument('--individual', default=False, action='store_true')
     parser.add_argument('--save_dir', type=str, default='./adv_inputs')
     parser.add_argument('--batch_size', type=int, default=200)
-    parser.add_argument('--log_name', type=str, default='autoattack.txt')
     parser.add_argument('--version', type=str, default='standard')
 
     args = parser.parse_args()
@@ -94,7 +93,8 @@ if __name__ == '__main__':
     ckpt = filter_state_dict(torch.load(args.checkpoint, map_location=device))
     net.load_state_dict(ckpt)
 
-    log_path =os.path.join(os.path.dirname(args.checkpoint), args.log_name)
+    train_log_path =os.path.join(os.path.dirname(args.checkpoint), 'autoattack_train.txt')
+    test_log_path =os.path.join(os.path.dirname(args.checkpoint), 'autoattack_test.txt')
 
     model = nn.Sequential(Normalize(mean=mean, std=std), net)
 
@@ -104,8 +104,12 @@ if __name__ == '__main__':
     # load data
     transform_list = [transforms.ToTensor()]
     transform_chain = transforms.Compose(transform_list)
-    item = getattr(datasets, args.data)(root=args.data_dir, train=False, transform=transform_chain, download=True)
-    test_loader = data.DataLoader(item, batch_size=1000, shuffle=False, num_workers=0)
+
+    train_data = getattr(datasets, args.data)(root=args.data_dir, train=True, transform=transform_chain, download=True)
+    train_loader = data.DataLoader(train_data, batch_size=1000, shuffle=False, num_workers=0)
+
+    test_data = getattr(datasets, args.data)(root=args.data_dir, train=False, transform=transform_chain, download=True)
+    test_loader = data.DataLoader(test_data, batch_size=1000, shuffle=False, num_workers=0)
     
     # create save dir
     if not os.path.exists(args.save_dir):
@@ -113,13 +117,11 @@ if __name__ == '__main__':
     
     # load attack    
     from autoattack import AutoAttack
-    adversary = AutoAttack(model, norm=args.norm, eps=args.epsilon, log_path=log_path)
+    adversary = AutoAttack(model, norm=args.norm, eps=args.epsilon, log_path=train_log_path)
     
-    l = [x for (x, y) in test_loader]
-    x_test = torch.cat(l, 0)
-    l = [y for (x, y) in test_loader]
-    y_test = torch.cat(l, 0)
-    
+    x_train, y_train = [torch.cat(x, 0) for x in zip(*list(train_loader))]
+    x_test, y_test = [torch.cat(x, 0) for x in zip(*list(test_loader))]
+
     # cheap version
     # example of custom version
     if args.version == 'custom':
@@ -130,9 +132,14 @@ if __name__ == '__main__':
     # run attack and save images
     if not args.individual:
         # adversary.attacks_to_run = ['fab-t', 'square']
-        adv_complete = adversary.run_standard_evaluation(x_test[:args.n_ex], y_test[:args.n_ex],
+        adv_complete = adversary.run_standard_evaluation(x_train[:10000], y_train[:10000],
                                                          bs=args.batch_size)
-
         torch.save({'adv_complete': adv_complete}, '{}/{}_{}_1_{}_eps_{:.5f}.pth'.format(
-            args.save_dir, 'aa', args.version, adv_complete.shape[0], args.epsilon))
+            args.save_dir, 'aa_train', args.version, adv_complete.shape[0], args.epsilon))
+        
+        adversary.logger.log_path = test_log_path
+        adv_complete = adversary.run_standard_evaluation(x_test, y_test,
+                                                         bs=args.batch_size)
+        torch.save({'adv_complete': adv_complete}, '{}/{}_{}_1_{}_eps_{:.5f}.pth'.format(
+            args.save_dir, 'aa_test', args.version, adv_complete.shape[0], args.epsilon))
 
