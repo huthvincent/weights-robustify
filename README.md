@@ -15,6 +15,8 @@ Some notes:
   - Default test process would be conducted after training via *attack pgd-20* with target metrics **natural accuracy** and **robust accuracy**.
   - Autoattack could be launched via ```python AT-AWP/eval_autoattack.py``` for both training and test sets, with standard attacks **apgd-ce**, **apgd-t**, **fab-t**, and **square**. Note that args `--norm` and `--epsilon` shall be kept in consistency with that in training. For instance, in setting 1 of cifar-10, run ```python AT-AWP/eval_autoattack.py --data CIFAR10 --norm L2 --epsilon 128/255```.
 
+  add something
+
 ## Cifar-10 Dataset
 
 ### Setting 1
