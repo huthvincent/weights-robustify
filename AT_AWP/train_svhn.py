@@ -111,7 +111,7 @@ def get_args():
     parser.add_argument('--l2', default=0, type=float)
     parser.add_argument('--l1', default=0, type=float)
     parser.add_argument('--batch-size', default=128, type=int)
-    parser.add_argument('--data-dir', default='./data/svhn-data', type=str)
+    parser.add_argument('--data-dir', default='./svhn-data', type=str)
     parser.add_argument('--epochs', default=200, type=int)
     parser.add_argument('--lr-schedule', default='piecewise', choices=['superconverge', 'piecewise'])
     parser.add_argument('--lr-max', default=0.01, type=float)
@@ -143,8 +143,6 @@ def main():
     if args.awp_gamma <= 0.0:
         args.awp_warmup = np.infty
 
-    # redirect output to ./output directory
-    args.fname = os.path.join('./output', args.fname)
     if not os.path.exists(args.fname):
         os.makedirs(args.fname)
 
